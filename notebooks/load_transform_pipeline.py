@@ -74,9 +74,16 @@ class Dummy_explotable_transformer(BaseEstimator, TransformerMixin):
     def __init__(self):
         from ast import literal_eval
         self.literal_eval = literal_eval
-        
+
+    def clean_amenities(self, colValues):
+        import re
+        colValues = colValues.apply(lambda s: re.sub(r'[}{@#$"]', '', s).lower().split(','))
+        return pd.get_dummies(
+            data = colValues.apply(pd.Series).stack(),
+            prefix = 'amenities'
+        ).sum(level=0)
+
     def to_dummy(self, s, col_name):
-        
         return pd.get_dummies(
             data = s.apply(lambda x: self.literal_eval(x) if isinstance(self.literal_eval(x), list) else ['none']).apply(pd.Series).stack(),
             prefix = col_name
@@ -86,16 +93,19 @@ class Dummy_explotable_transformer(BaseEstimator, TransformerMixin):
         return self
     
     def transform (self, X, y = None):
-        for col in X.columns:
-            X = pd.concat([X, self.to_dummy(X[col], col)], axis=1,).fillna(0).drop(col, axis=1)
+        X = pd.concat([X, self.to_dummy(X['host_verifications'], 'host_verifications')], axis=1,).fillna(0).drop('host_verifications', axis=1)
+        X = pd.concat([X, self.clean_amenities(X['amenities'])], axis=1).fillna(0).drop('amenities', axis=1)
         return X
     
 class Dummy_explotable_transformer_2(BaseEstimator, TransformerMixin):
-    
-    def fit(self, X, y=
-            None):
-        self.columns = X.columns
+
+    def fit(self, X, y=None):
+        total = len(X)
+        self.columns = X.columns[
+            (X.apply(sum, axis=0)/total <= .9).values & (X.apply(sum, axis=0)/total >= .2).values
+        ]
         return self
+
     def transform(self, X_transform, y=None):
         match_colums = [col for col in self.columns if (col in X_transform.columns)]
         missing_columns = [col for col in self.columns if (col not in X_transform.columns)]
@@ -105,6 +115,13 @@ class Dummy_explotable_transformer_2(BaseEstimator, TransformerMixin):
         X = X[self.columns].astype(float)
         return X
 
+
+class FeaturesToLower(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        return X.applymap(lambda x: str(x).lower().strip())
 
 class NumericalImputer(BaseEstimator, TransformerMixin):
     def __init__( self, default_strategy = "median"):
@@ -182,7 +199,85 @@ class NumericalAddFeatures(BaseEstimator, TransformerMixin):
             X['bath_per_bed'] = X['bathrooms'] / X['beds']
         return X
 
+class DateTransformer( BaseEstimator, TransformerMixin ):
+    #Class Constructor
+    mode = {}
+    def __init__( self ):
+        return None
+    #Return self nothing else to do here    
+    def fit( self, X, y = None ):
+        for col in X.columns:
+            self.mode[col] = X[col].mode()[0]
+        return self 
+    
+    #Method that describes what we need this transformer to do
+    def transform( self, X, y = None ):
+        X = X[list(self.mode.keys())]
+        for col in self.mode.keys():
+            X.loc[:,col] = pd.to_datetime(X.loc[:,col].fillna(self.mode[col])).apply(lambda x: x.timestamp())
+            
+        from itertools import combinations
+        
+        for cols in list(combinations(self.mode.keys(), 2)):
+            X.loc[:,cols[0]+'_resta_'+cols[1]] = (X.loc[:,cols[0]] - X.loc[:,cols[1]]).apply(abs)
+            X.loc[:,cols[0]+'_resta_'+cols[1]+'_log'] = np.log(X.loc[:,cols[0]+'_resta_'+cols[1]] + 1)
+            
+        return X
 
+class GeoTransformer( BaseEstimator, TransformerMixin ):
+    
+    def __init__( self, geoCols, cityCol ):
+        self._geoCols = geoCols
+        self._cityCol = cityCol
+        
+    def getPercentage(self, _input, _mean, _range):
+        if(_range == 0):
+            _range = 0.001
+        return (_input - _mean) / (_range/2) * 100
+    
+    def fit( self, X, y = None ):
+        cities = X[self._cityCol].unique()
+        self._cities = {}
+        for cityName in cities:
+            cityDf = X[X[self._cityCol] == cityName]
+            self._cities[cityName] = {}
+            for coord in self._geoCols:
+                self._cities[cityName][coord] = {
+                    'max': cityDf[coord].max(),
+                    'min': cityDf[coord].min(),
+                    'mean': (cityDf[coord].max() + cityDf[coord].min()) / 2,
+                    'real_mean': cityDf[coord].mean(),
+                    'range': cityDf[coord].max() - cityDf[coord].min()
+                }
+        return self
+    
+    def add_features(self, df):
+        cityName = df.name
+        import math
+        import numpy as np
+        
+        if cityName in self._cities.keys():
+            cityData = self._cities[cityName]
+            for coord in self._geoCols:
+                df[coord] = self.getPercentage(df[coord], cityData[coord]['mean'], cityData[coord]['range'])
+                df[coord+'_fromMean'] = self.getPercentage(df[coord], cityData[coord]['real_mean'], cityData[coord]['range'])
+                df[coord+'_sin'] = np.sin(df[coord])
+                df[coord+'_log'] = np.log(np.abs(df[coord]) + 1)
+            df['distance'] = np.hypot(df[self._geoCols[0]], df[self._geoCols[1]])
+        else:
+            for coord in self._geoCols:
+                
+                df[coord] = 0
+                df[coord+'_fromMean'] = 0
+                df[coord+'_sin'] = 0
+                df[coord+'_log'] = 0
+            df['distance'] = 0
+        return df
+    
+    def transform( self, X, y = None ):
+        X = X.groupby([self._cityCol]).apply(self.add_features)
+        X = X.drop(self._cityCol, axis=1)
+        return X
 
 
 import pickle
