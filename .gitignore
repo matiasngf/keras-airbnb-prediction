@@ -4,3 +4,5 @@ notebooks/.ipynb_checkpoints/
 notebooks/__pycache__/
 
 models/data.pkl
+
+presentacion_src/
